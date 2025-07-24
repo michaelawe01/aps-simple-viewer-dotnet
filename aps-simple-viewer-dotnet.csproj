@@ -6,5 +6,8 @@
     <PackageReference Include="Autodesk.Authentication" Version="2.0.0" />
     <PackageReference Include="Autodesk.ModelDerivative" Version="2.0.0" />
     <PackageReference Include="Autodesk.OSS" Version="2.0.0" />
+    <PackageReference Include="Chuongmep.Navis.Api.AdWindows" Version="2025.0.0" />
+    <PackageReference Include="Chuongmep.Navis.Api.Autodesk.Navisworks.Api" Version="2025.0.0" />
+    <PackageReference Include="Chuongmep.Navis.Api.Autodesk.Navisworks.Timeliner" Version="2023.0.7" />
   </ItemGroup>
 </Project>
