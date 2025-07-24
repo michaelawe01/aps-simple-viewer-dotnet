@@ -10,6 +10,7 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
         this.timelinePanel = null;
         this.timelineButton = null;
         this.isPanelVisible = false;
+        this.elementNamesCache = new Map(); // Cache for element names
     }
 
     initializeConstants() {
@@ -39,8 +40,20 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
             RESPONSIBLE: { id: 'responsible', title: 'Responsible', width: 120 },
             RELATIONSHIP: { id: 'relationship', title: 'Relationship', width: 100 },
             PREDECESSOR: { id: 'predecessor', title: 'Predecessor', width: 100 },
+            LINKED_ELEMENTS: { id: 'linkedElements', title: 'LinkedElements', width: 120 },
+            ELEMENTS_NAMES: { id: 'elementsNames', title: 'Elements_names', width: 150 },
             STATUS: { id: 'status', title: 'Status', width: 80 }
         };
+        
+        // Element linking modes
+        this.LINKING_MODES = {
+            ONE_TO_ONE: 'One element to one task',
+            MANY_TO_ONE: 'Many elements to one task',
+            ONE_TO_MANY: 'One element to many tasks'
+        };
+        
+        // Global element mapping for one-to-many relationships
+        this.elementTaskMapping = new Map(); // elementId -> [taskIds]
     }
 
     load() {
@@ -289,7 +302,7 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                     <div class="timeline-scroll-container" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; overflow: auto;">
                         <div class="grid-container" style="display: flex; min-width: max-content;">
                             <!-- Task Grid -->
-                            <div id="taskGrid" style="width: 900px; flex-shrink: 0;">
+                            <div id="taskGrid" style="width: 1200px; flex-shrink: 0;">
                                 <table class="task-table" style="width: 100%; border-collapse: collapse;">
                                     <thead>
                                         <tr>
@@ -302,6 +315,8 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                                             <th style="position: sticky; top: 0; background: #f5f5f5; padding: 4px; text-align: left; border-bottom: 1px solid #ccc; font-size: 11px; width: 84px;">Responsible</th>
                                             <th style="position: sticky; top: 0; background: #f5f5f5; padding: 4px; text-align: left; border-bottom: 1px solid #ccc; font-size: 11px; width: 70px;">Relationship</th>
                                             <th style="position: sticky; top: 0; background: #f5f5f5; padding: 4px; text-align: left; border-bottom: 1px solid #ccc; font-size: 11px; width: 70px;">Predecessor</th>
+                                            <th style="position: sticky; top: 0; background: #f5f5f5; padding: 4px; text-align: left; border-bottom: 1px solid #ccc; font-size: 11px; width: 120px;">LinkedElements</th>
+                                            <th style="position: sticky; top: 0; background: #f5f5f5; padding: 4px; text-align: left; border-bottom: 1px solid #ccc; font-size: 11px; width: 150px;">Elements_names</th>
                                             <th style="position: sticky; top: 0; background: #f5f5f5; padding: 4px; text-align: left; border-bottom: 1px solid #ccc; font-size: 11px; width: 56px;">Status</th>
                                         </tr>
                                     </thead>
@@ -408,12 +423,57 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                 .gantt-bar:hover {
                     opacity: 0.8;
                 }
+                .element-link-btn {
+                    padding: 1px 4px;
+                    background: #28a745;
+                    color: white;
+                    border: none;
+                    border-radius: 2px;
+                    cursor: pointer;
+                    font-size: 10px;
+                    margin-right: 2px;
+                }
+                .element-link-btn:hover {
+                    background: #218838;
+                }
+                .elements-display {
+                    max-height: 60px;
+                    overflow-y: auto;
+                    font-size: 9px;
+                    line-height: 1.2;
+                }
+                .element-item {
+                    display: inline-block;
+                    background: #e9ecef;
+                    padding: 1px 3px;
+                    margin: 1px;
+                    border-radius: 2px;
+                    font-size: 9px;
+                }
+                .element-browser {
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    width: 500px;
+                    height: 400px;
+                    background: white;
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                    z-index: 10000;
+                    display: none;
+                    flex-direction: column;
+                }
             </style>
         `;
         container.innerHTML = controls;
 
         // Add to viewer
         this.viewer.container.appendChild(container);
+        
+        // Store reference for global access
+        window.timelineExt = this;
 
         // Add event listeners
         const playButton = document.getElementById('playButton');
@@ -566,6 +626,17 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                     task.duration = this.calculateDuration(task.startDate, task.endDate);
                     this.updateTaskGrid(); // Refresh to show new duration
                 }
+                
+                // If linking mode changed, reset element associations if needed
+                if (field === 'linkedElements') {
+                    if (value === this.LINKING_MODES.ONE_TO_ONE && task.elementIds.length > 1) {
+                        task.elementIds = task.elementIds.slice(0, 1);
+                        task.elementsNames = await this.getElementName(task.elementIds[0]);
+                    } else if (value === this.LINKING_MODES.ONE_TO_MANY && task.elementIds.length > 1) {
+                        task.elementIds = task.elementIds.slice(0, 1);
+                        task.elementsNames = await this.getElementName(task.elementIds[0]);
+                    }
+                }
 
                 // Update visuals
                 this.updateTaskGrid();
@@ -666,7 +737,10 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
             status: 'Not Started',
             level: parentId ? this.getTaskLevel(parentId) + 1 : 0,
             subtasks: [],
-            duration: this.calculateDuration(startDate, endDate)
+            duration: this.calculateDuration(startDate, endDate),
+            linkedElements: 'One element to one task', // Default linking mode
+            elementIds: [], // Array of linked element IDs
+            elementsNames: '' // Display string for element names
         };
         
         if (parentId) {
@@ -728,6 +802,8 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                 { value: task.responsible, field: 'responsible' },
                 { value: task.relationship || '', field: 'relationship', type: 'select', options: Object.values(this.RELATIONSHIPS) },
                 { value: task.predecessor || '', field: 'predecessor' },
+                { value: task.linkedElements || this.LINKING_MODES.ONE_TO_ONE, field: 'linkedElements', type: 'custom', customType: 'linkedElements' },
+                { value: task.elementsNames || '', field: 'elementsNames', type: 'custom', customType: 'elementsNames' },
                 { value: task.status, field: 'status' }
             ];
             
@@ -749,6 +825,23 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                         <input type="date" class="editable-cell" style="width: 100%; border: none; background: transparent; font-size: 11px;"
                             value="${cell.value}" data-field="${cell.field}" data-task-id="${task.id}">
                     </td>`;
+                } else if (cell.type === 'custom') {
+                    if (cell.customType === 'linkedElements') {
+                        return `<td style="${cell.style || ''}">
+                            <select class="editable-cell" style="width: 80%; border: none; background: transparent; font-size: 10px;"
+                                data-field="${cell.field}" data-task-id="${task.id}">
+                                ${Object.values(this.LINKING_MODES).map(mode => 
+                                    `<option value="${mode}" ${cell.value === mode ? 'selected' : ''}>${mode}</option>`
+                                ).join('')}
+                            </select>
+                            <button class="element-link-btn" onclick="window.timelineExt.openElementBrowser(${task.id})" title="Link Elements">🔗</button>
+                        </td>`;
+                    } else if (cell.customType === 'elementsNames') {
+                        const elementsDisplay = this.renderElementsDisplay(task);
+                        return `<td style="${cell.style || ''}">
+                            <div class="elements-display">${elementsDisplay}</div>
+                        </td>`;
+                    }
                 } else {
                     return `<td style="${cell.style || ''}">
                         <input type="text" class="editable-cell" style="width: 100%; border: none; background: transparent; font-size: 11px;"
@@ -778,9 +871,12 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
         const rowHeight = 24; // Match table row height
         const headerHeight = 30;
         
-        canvas.width = ganttContainer.clientWidth * dpr;
+        // Double the canvas width to provide more space for timeline
+        const expandedWidth = ganttContainer.clientWidth * 2;
+        
+        canvas.width = expandedWidth * dpr;
         canvas.height = (this.getAllTasks().length * rowHeight + headerHeight) * dpr;
-        canvas.style.width = `${ganttContainer.clientWidth}px`;
+        canvas.style.width = `${expandedWidth}px`;
         canvas.style.height = `${this.getAllTasks().length * rowHeight + headerHeight}px`;
         
         // Scale context for high DPI displays
@@ -789,8 +885,8 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
         // Clear canvas
         ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
         
-        // Draw timeline
-        this.drawTimeline(ctx, ganttContainer.clientWidth, headerHeight);
+        // Draw timeline with expanded width
+        this.drawTimeline(ctx, expandedWidth, headerHeight);
         
         // Draw tasks
         let y = headerHeight;
@@ -815,25 +911,29 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
     }
     
     drawTimeline(ctx, width, height) {
-        const totalDays = (this.endDate - this.startDate) / (1000 * 60 * 60 * 24);
-        const dayWidth = (width - 40) / (totalDays * 0.7); // Increased day width by reducing the divisor
+        // Calculate total months between start and end dates
+        const startYear = this.startDate.getFullYear();
+        const startMonth = this.startDate.getMonth();
+        const endYear = this.endDate.getFullYear();
+        const endMonth = this.endDate.getMonth();
+        const totalMonths = (endYear - startYear) * 12 + (endMonth - startMonth) + 1;
+        
+        // Increase month width by 2x for better spacing and readability
+        const monthWidth = ((width - 40) * 2) / totalMonths;
         
         // Draw timeline background
         ctx.fillStyle = '#f5f5f5';
         ctx.fillRect(0, 0, width, height);
         
-        // Draw date scales
+        // Draw date scales with monthly intervals
         ctx.fillStyle = '#333';
         ctx.font = '11px Arial';
-        let currentDate = new Date(this.startDate);
-        let x = 20; // Start from left margin
         
-        // Draw timeline grid and dates
+        let x = 20; // Start from left margin
+        let currentDate = new Date(startYear, startMonth, 1); // First day of start month
+        
+        // Draw monthly grid and dates
         while (currentDate <= this.endDate) {
-            const month = (currentDate.getMonth() + 1).toString().padStart(2, '0');
-            const lastDay = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
-            const daysThisMonth = lastDay.getDate();
-            
             // Month separator line
             ctx.beginPath();
             ctx.strokeStyle = '#ddd';
@@ -841,38 +941,25 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
             ctx.lineTo(x, height);
             ctx.stroke();
             
-            // Draw days
-            for (let day = 1; day <= daysThisMonth; day++) {
-                const dayX = x + (day - 1) * dayWidth;
-                
-                // Day separator (lighter)
-                ctx.beginPath();
-                ctx.strokeStyle = '#eee';
-                ctx.moveTo(dayX, 20);
-                ctx.lineTo(dayX, height);
-                ctx.stroke();
-                
-                // Show date in dd/mm format
-                const formattedDate = `${day.toString().padStart(2, '0')}/${month}`;
-                ctx.fillStyle = '#666';
-                // Rotate text for better readability
-                ctx.save();
-                ctx.translate(dayX + 2, 15);
-                ctx.rotate(-Math.PI / 6);
-                ctx.fillText(formattedDate, 0, 0);
-                ctx.restore();
-            }
+            // Show date in dd/mm format (first day of the month)
+            const day = '01';
+            const month = (currentDate.getMonth() + 1).toString().padStart(2, '0');
+            const formattedDate = `${day}/${month}`;
+            
+            ctx.fillStyle = '#666';
+            ctx.fillText(formattedDate, x + 2, 15);
             
             // Move to next month
             currentDate.setMonth(currentDate.getMonth() + 1);
-            x += daysThisMonth * dayWidth;
+            x += monthWidth;
         }
     }
     
     drawTask(ctx, task, y) {
         const totalDays = (this.endDate - this.startDate) / (1000 * 60 * 60 * 24);
         const canvasWidth = document.getElementById('ganttChart').clientWidth;
-        const dayWidth = (canvasWidth - 40) / (totalDays * 0.7); // Match timeline day width
+        // Increase day width by 2x to match expanded timeline
+        const dayWidth = ((canvasWidth - 40) * 2) / totalDays;
         
         const taskStart = new Date(task.startDate);
         const taskEnd = new Date(task.endDate);
@@ -899,28 +986,11 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
             ctx.fillStyle = gradient;
             ctx.fillRect(x, barY, width, barHeight);
         } else {
-            // Subtask - lighter color with pattern
+            // Subtask - lighter color without pattern
             ctx.fillStyle = '#4f9de3';
             ctx.fillRect(x, barY + 2, width, barHeight - 4); // Slightly smaller height
-            // Add subtle diagonal pattern
             ctx.strokeStyle = '#3d7ab3';
-            ctx.lineWidth = 0.5;
-            for (let i = 0; i < width; i += 6) {
-                ctx.beginPath();
-                ctx.moveTo(x + i, barY + 2);
-                ctx.lineTo(x + i + 6, barY + barHeight - 2);
-                ctx.stroke();
-            }
-            ctx.lineWidth = 1;
-        }
-        
-        // Add duration label
-        ctx.fillStyle = '#fff';
-        ctx.font = '11px Arial';
-        const text = `${duration}d`;
-        const textWidth = ctx.measureText(text).width;
-        if (width > textWidth + 10) {
-            ctx.fillText(text, x + (width - textWidth) / 2, barY + 14);
+            ctx.strokeRect(x, barY + 2, width, barHeight - 4);
         }
         
         // Draw progress indicator if task is in progress
@@ -942,7 +1012,8 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
         
         const totalDays = (this.endDate - this.startDate) / (1000 * 60 * 60 * 24);
         const canvasWidth = document.getElementById('ganttChart').clientWidth;
-        const dayWidth = (canvasWidth - 40) / (totalDays * 0.7);
+        // Increase day width by 2x to match expanded timeline
+        const dayWidth = ((canvasWidth - 40) * 2) / totalDays;
         
         // Calculate positions
         const startX = 20 + ((new Date(predecessor.endDate) - this.startDate) / (1000 * 60 * 60 * 24)) * dayWidth;
@@ -1045,7 +1116,7 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                 return;
             }
 
-            await this.addTask(
+            const newTask = await this.addTask(
                 selection,
                 formData.get('type'),
                 formData.get('startDate'),
@@ -1055,6 +1126,17 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                 formData.get('trade'),
                 formData.get('responsible')
             );
+            
+            // Initialize element linking with selected elements
+            if (selection && selection.length > 0) {
+                newTask.elementIds = [...selection];
+                const elementNames = [];
+                for (const id of selection) {
+                    const name = await this.getElementName(id);
+                    elementNames.push(name);
+                }
+                newTask.elementsNames = elementNames.join(', ');
+            }
 
             dialog.close();
             dialog.remove();
@@ -1129,6 +1211,330 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
             this.updateTaskGrid();
             this.updateGanttChart();
         }
+    }
+    
+    // Element linking functionality
+    renderElementsDisplay(task) {
+        if (!task.elementIds || task.elementIds.length === 0) {
+            return '<span style="color: #999; font-style: italic;">No elements linked</span>';
+        }
+        
+        const elementNames = task.elementIds.map(id => {
+            const name = this.getElementName(id);
+            return `<span class="element-item" title="ID: ${id}">${name}</span>`;
+        });
+        
+        return elementNames.join('');
+    }
+    
+    async getElementName(dbId) {
+        if (this.elementNamesCache.has(dbId)) {
+            return this.elementNamesCache.get(dbId);
+        }
+        
+        return new Promise((resolve) => {
+            this.viewer.getProperties(dbId, (props) => {
+                let name = `Element ${dbId}`;
+                if (props && props.properties) {
+                    const nameProperty = props.properties.find(p => 
+                        p.displayName === 'Name' || p.displayName === 'Element Name' || 
+                        p.attributeName === 'name' || p.attributeName === 'Name'
+                    );
+                    if (nameProperty) {
+                        name = nameProperty.displayValue || nameProperty.value || name;
+                    }
+                }
+                this.elementNamesCache.set(dbId, name);
+                resolve(name);
+            }, () => {
+                const name = `Element ${dbId}`;
+                this.elementNamesCache.set(dbId, name);
+                resolve(name);
+            });
+        });
+    }
+    
+    openElementBrowser(taskId) {
+        const task = this.findTask(taskId);
+        if (!task) return;
+        
+        // Create element browser dialog
+        const browser = this.createElementBrowser(task);
+        document.body.appendChild(browser);
+        browser.style.display = 'flex';
+    }
+    
+    createElementBrowser(task) {
+        const browser = document.createElement('div');
+        browser.className = 'element-browser';
+        
+        browser.innerHTML = `
+            <div style="padding: 10px; border-bottom: 1px solid #ccc; background: #f8f9fa; display: flex; justify-content: space-between; align-items: center;">
+                <h4 style="margin: 0; font-size: 14px;">Link Elements to Task: ${task.name}</h4>
+                <button onclick="this.closest('.element-browser').remove()" style="background: #dc3545; color: white; border: none; border-radius: 3px; padding: 5px 10px; cursor: pointer;">✕</button>
+            </div>
+            <div style="padding: 10px; flex-grow: 1; display: flex; flex-direction: column;">
+                <div style="margin-bottom: 10px;">
+                    <label style="font-size: 12px; font-weight: bold;">Linking Mode: ${task.linkedElements}</label>
+                </div>
+                <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                    <button id="selectFromViewer" class="element-link-btn" style="padding: 5px 10px;">Select from Viewer</button>
+                    <button id="browseModel" class="element-link-btn" style="padding: 5px 10px;">Browse Model</button>
+                    <button id="clearSelection" class="element-link-btn" style="background: #dc3545; padding: 5px 10px;">Clear All</button>
+                </div>
+                <div style="border: 1px solid #ddd; padding: 10px; flex-grow: 1; overflow-y: auto; background: #f9f9f9;">
+                    <div style="font-size: 12px; font-weight: bold; margin-bottom: 5px;">Currently Linked Elements:</div>
+                    <div id="currentElements" style="max-height: 150px; overflow-y: auto;">
+                        ${this.renderCurrentElements(task)}
+                    </div>
+                    <div style="font-size: 12px; font-weight: bold; margin: 10px 0 5px 0;">Available Elements:</div>
+                    <div id="availableElements" style="max-height: 150px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; background: white;">
+                        <div style="color: #666; font-style: italic;">Select elements from viewer or browse model</div>
+                    </div>
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+                    <button onclick="this.closest('.element-browser').remove()" style="padding: 5px 15px; background: #6c757d; color: white; border: none; border-radius: 3px; cursor: pointer;">Cancel</button>
+                    <button id="applyElements" style="padding: 5px 15px; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">Apply</button>
+                </div>
+            </div>
+        `;
+        
+        // Add event listeners
+        const selectFromViewer = browser.querySelector('#selectFromViewer');
+        const browseModel = browser.querySelector('#browseModel');
+        const clearSelection = browser.querySelector('#clearSelection');
+        const applyElements = browser.querySelector('#applyElements');
+        const availableElements = browser.querySelector('#availableElements');
+        
+        let selectedElements = [...task.elementIds]; // Copy current elements
+        
+        selectFromViewer.onclick = () => {
+            const selection = this.viewer.getSelection();
+            if (selection.length === 0) {
+                alert('Please select elements in the viewer first');
+                return;
+            }
+            
+            this.handleElementSelection(task, selection, selectedElements, availableElements);
+        };
+        
+        browseModel.onclick = () => {
+            this.openModelBrowser(task, selectedElements, availableElements);
+        };
+        
+        clearSelection.onclick = () => {
+            selectedElements.length = 0;
+            availableElements.innerHTML = '<div style="color: #666; font-style: italic;">All elements cleared</div>';
+        };
+        
+        applyElements.onclick = () => {
+            this.applyElementLinking(task, selectedElements);
+            browser.remove();
+        };
+        
+        return browser;
+    }
+    
+    renderCurrentElements(task) {
+        if (!task.elementIds || task.elementIds.length === 0) {
+            return '<div style="color: #666; font-style: italic;">No elements currently linked</div>';
+        }
+        
+        return task.elementIds.map(id => {
+            const name = this.elementNamesCache.get(id) || `Element ${id}`;
+            return `<div style="padding: 2px 5px; margin: 2px 0; background: #e9ecef; border-radius: 3px; font-size: 11px;">
+                ${name} (ID: ${id})
+                <button onclick="this.remove()" style="float: right; background: #dc3545; color: white; border: none; border-radius: 2px; padding: 1px 4px; font-size: 10px; cursor: pointer;">×</button>
+            </div>`;
+        }).join('');
+    }
+    
+    handleElementSelection(task, selection, selectedElements, container) {
+        const linkingMode = task.linkedElements;
+        
+        if (linkingMode === this.LINKING_MODES.ONE_TO_ONE) {
+            if (selection.length > 1) {
+                alert('One-to-one mode: Please select only one element');
+                return;
+            }
+            selectedElements.length = 0;
+            selectedElements.push(...selection);
+        } else if (linkingMode === this.LINKING_MODES.MANY_TO_ONE) {
+            // Add to existing selection
+            selection.forEach(id => {
+                if (!selectedElements.includes(id)) {
+                    selectedElements.push(id);
+                }
+            });
+        } else if (linkingMode === this.LINKING_MODES.ONE_TO_MANY) {
+            if (selection.length > 1) {
+                alert('One-to-many mode: Please select only one element');
+                return;
+            }
+            selectedElements.length = 0;
+            selectedElements.push(...selection);
+        }
+        
+        this.updateAvailableElementsDisplay(selectedElements, container);
+    }
+    
+    async updateAvailableElementsDisplay(elementIds, container) {
+        if (elementIds.length === 0) {
+            container.innerHTML = '<div style="color: #666; font-style: italic;">No elements selected</div>';
+            return;
+        }
+        
+        const elementItems = [];
+        for (const id of elementIds) {
+            const name = await this.getElementName(id);
+            elementItems.push(`<div style="padding: 3px 6px; margin: 2px; background: #d4eddf; border-radius: 3px; font-size: 11px; border-left: 3px solid #28a745;">
+                ${name} (ID: ${id})
+            </div>`);
+        }
+        
+        container.innerHTML = elementItems.join('');
+    }
+    
+    openModelBrowser(task, selectedElements, container) {
+        // Simple model browser - gets all leaf nodes
+        const instanceTree = this.viewer.model.getData().instanceTree;
+        if (!instanceTree) {
+            alert('Model tree not available');
+            return;
+        }
+        
+        // Reference to task for potential future use
+        console.log('Opening model browser for task:', task.name);
+        
+        const leafNodes = [];
+        instanceTree.enumNodeChildren(instanceTree.getRootId(), (dbId) => {
+            if (!instanceTree.getChildCount(dbId)) {
+                leafNodes.push(dbId);
+            }
+        }, true);
+        
+        // Create a simple selection dialog
+        const browserDialog = document.createElement('div');
+        browserDialog.style.cssText = `
+            position: fixed; top: 60px; right: 20px; width: 300px; height: 400px;
+            background: white; border: 1px solid #ccc; border-radius: 5px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3); z-index: 10001;
+            display: flex; flex-direction: column;
+        `;
+        
+        browserDialog.innerHTML = `
+            <div style="padding: 10px; border-bottom: 1px solid #ccc; background: #f8f9fa;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-weight: bold; font-size: 12px;">Model Browser</span>
+                    <button onclick="this.closest('div').remove()" style="background: #dc3545; color: white; border: none; border-radius: 3px; padding: 2px 6px; cursor: pointer;">✕</button>
+                </div>
+                <input type="text" id="elementFilter" placeholder="Filter elements..." style="width: 100%; margin-top: 5px; padding: 3px; font-size: 11px; border: 1px solid #ccc; border-radius: 3px;">
+            </div>
+            <div id="elementList" style="flex-grow: 1; overflow-y: auto; padding: 5px; font-size: 11px;"></div>
+            <div style="padding: 10px; border-top: 1px solid #ccc;">
+                <button id="addSelectedElements" style="width: 100%; padding: 5px; background: #28a745; color: white; border: none; border-radius: 3px; cursor: pointer;">Add Selected</button>
+            </div>
+        `;
+        
+        document.body.appendChild(browserDialog);
+        
+        // Populate element list
+        this.populateElementList(leafNodes, browserDialog.querySelector('#elementList'));
+        
+        // Add filter functionality
+        const filterInput = browserDialog.querySelector('#elementFilter');
+        filterInput.oninput = () => {
+            this.filterElementList(leafNodes, browserDialog.querySelector('#elementList'), filterInput.value);
+        };
+        
+        // Add selection functionality
+        browserDialog.querySelector('#addSelectedElements').onclick = () => {
+            const checkboxes = browserDialog.querySelectorAll('input[type="checkbox"]:checked');
+            const newElements = Array.from(checkboxes).map(cb => parseInt(cb.value));
+            
+            newElements.forEach(id => {
+                if (!selectedElements.includes(id)) {
+                    selectedElements.push(id);
+                }
+            });
+            
+            this.updateAvailableElementsDisplay(selectedElements, container);
+            browserDialog.remove();
+        };
+    }
+    
+    async populateElementList(nodeIds, container) {
+        const items = [];
+        const batchSize = 50;
+        
+        for (let i = 0; i < Math.min(nodeIds.length, 200); i += batchSize) {
+            const batch = nodeIds.slice(i, i + batchSize);
+            const batchItems = await Promise.all(
+                batch.map(async (id) => {
+                    const name = await this.getElementName(id);
+                    return `<div style="display: flex; align-items: center; padding: 2px; border-bottom: 1px solid #eee;">
+                        <input type="checkbox" value="${id}" style="margin-right: 5px;">
+                        <span title="ID: ${id}">${name}</span>
+                    </div>`;
+                })
+            );
+            items.push(...batchItems);
+        }
+        
+        container.innerHTML = items.join('');
+        
+        if (nodeIds.length > 200) {
+            container.innerHTML += '<div style="padding: 10px; text-align: center; color: #666; font-style: italic;">Showing first 200 elements. Use filter to narrow down results.</div>';
+        }
+    }
+    
+    async filterElementList(nodeIds, container, filterText) {
+        if (!filterText.trim()) {
+            this.populateElementList(nodeIds, container);
+            return;
+        }
+        
+        const filteredIds = [];
+        for (const id of nodeIds) {
+            const name = await this.getElementName(id);
+            if (name.toLowerCase().includes(filterText.toLowerCase()) || id.toString().includes(filterText)) {
+                filteredIds.push(id);
+            }
+            if (filteredIds.length >= 100) break; // Limit results
+        }
+        
+        this.populateElementList(filteredIds, container);
+    }
+    
+    async applyElementLinking(task, selectedElements) {
+        const linkingMode = task.linkedElements;
+        
+        // Handle one-to-many relationships
+        if (linkingMode === this.LINKING_MODES.ONE_TO_MANY && selectedElements.length === 1) {
+            const elementId = selectedElements[0];
+            if (!this.elementTaskMapping.has(elementId)) {
+                this.elementTaskMapping.set(elementId, []);
+            }
+            const taskList = this.elementTaskMapping.get(elementId);
+            if (!taskList.includes(task.id)) {
+                taskList.push(task.id);
+            }
+        }
+        
+        // Update task with selected elements
+        task.elementIds = [...selectedElements];
+        
+        // Update elements names display
+        const elementNames = [];
+        for (const id of selectedElements) {
+            const name = await this.getElementName(id);
+            elementNames.push(name);
+        }
+        task.elementsNames = elementNames.join(', ');
+        
+        // Refresh the grid
+        this.updateTaskGrid();
+        this.updateGanttChart();
     }
 }
 
