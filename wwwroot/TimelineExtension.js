@@ -7,6 +7,9 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
         this.startDate = new Date('2025-01-01');
         this.endDate = new Date('2026-12-31');
         this.currentDate = new Date('2025-01-01');
+        this.timelinePanel = null;
+        this.timelineButton = null;
+        this.isPanelVisible = false;
     }
 
     initializeConstants() {
@@ -43,22 +46,157 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
     load() {
         console.log('TimelineExtension loading...');
         this.initializeConstants();
-        this.createUI();
+        this.createToolbarButton();
         return true;
     }
 
     unload() {
-        const container = document.getElementById('timelineContainer');
-        if (container) {
-            container.remove();
+        // Remove timeline panel if it exists
+        if (this.timelinePanel) {
+            this.timelinePanel.remove();
+            this.timelinePanel = null;
         }
+        
+        // Remove toolbar button
+        if (this.timelineButton && this.viewer.toolbar) {
+            const timelineGroup = this.viewer.toolbar.getControl('timelineToolbarGroup');
+            if (timelineGroup) {
+                this.viewer.toolbar.removeControl('timelineToolbarGroup');
+            }
+        }
+        
+        this.isPanelVisible = false;
         return true;
     }
 
-    createUI() {
+    createToolbarButton() {
+        // Wait for toolbar to be ready
+        if (!this.viewer.toolbar) {
+            setTimeout(() => this.createToolbarButton(), 100);
+            return;
+        }
+
+        // Add custom CSS for timeline icon first
+        this.addTimelineIconCSS();
+
+        // Create timeline toolbar group
+        const timelineGroup = new Autodesk.Viewing.UI.ControlGroup('timelineToolbarGroup');
+        
+        // Create timeline button
+        this.timelineButton = new Autodesk.Viewing.UI.Button('timelineButton');
+        this.timelineButton.setToolTip('Timeline');
+        
+        // Set the icon using the container approach
+        this.timelineButton.container.classList.add('timeline-icon');
+        
+        // Add click handler
+        this.timelineButton.onClick = () => {
+            this.toggleTimelinePanel();
+        };
+        
+        // Add button to group
+        timelineGroup.addControl(this.timelineButton);
+        
+        // Add group to toolbar
+        this.viewer.toolbar.addControl(timelineGroup);
+        
+        console.log('Timeline toolbar button created and added to toolbar');
+    }
+
+    addTimelineIconCSS() {
+        if (document.getElementById('timeline-icon-css')) return;
+        
+        const style = document.createElement('style');
+        style.id = 'timeline-icon-css';
+        style.textContent = `
+            .timeline-icon:before {
+                content: "⏱";
+                font-size: 18px;
+                line-height: 1;
+                color: #333;
+            }
+            
+            .timeline-icon {
+                background: none !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                width: 40px !important;
+                height: 40px !important;
+                border: none !important;
+                position: relative !important;
+            }
+            
+            .timeline-icon:hover {
+                background-color: #e6f3ff !important;
+            }
+            
+            .timeline-icon.active {
+                background-color: #0078d4 !important;
+            }
+            
+            .timeline-icon.active:before {
+                color: white !important;
+            }
+            
+            /* Ensure the button container follows Autodesk styles */
+            .adsk-button.timeline-icon {
+                background: none !important;
+                border: none !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    toggleTimelinePanel() {
+        console.log('toggleTimelinePanel called, isPanelVisible:', this.isPanelVisible);
+        if (this.isPanelVisible) {
+            this.hideTimelinePanel();
+        } else {
+            this.showTimelinePanel();
+        }
+    }
+
+    showTimelinePanel() {
+        console.log('showTimelinePanel called');
+        if (!this.timelinePanel) {
+            console.log('Creating timeline panel...');
+            this.createTimelinePanel();
+        }
+        
+        console.log('Setting panel display to flex, panel element:', this.timelinePanel);
+        this.timelinePanel.style.display = 'flex';
+        this.isPanelVisible = true;
+        
+        // Update button state
+        if (this.timelineButton) {
+            this.timelineButton.addClass('active');
+            this.timelineButton.setState(Autodesk.Viewing.UI.Button.State.ACTIVE);
+        }
+        console.log('Timeline panel should now be visible');
+    }
+
+    hideTimelinePanel() {
+        console.log('hideTimelinePanel called');
+        if (this.timelinePanel) {
+            this.timelinePanel.style.display = 'none';
+        }
+        
+        this.isPanelVisible = false;
+        
+        // Update button state
+        if (this.timelineButton) {
+            this.timelineButton.removeClass('active');
+            this.timelineButton.setState(Autodesk.Viewing.UI.Button.State.INACTIVE);
+        }
+    }
+
+    createTimelinePanel() {
+        console.log('createTimelinePanel called');
         // Create timeline container
         const container = document.createElement('div');
         container.id = 'timelineContainer';
+        this.timelinePanel = container;
         
         // Make panel draggable
         let isDragging = false;
@@ -96,25 +234,32 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
         document.addEventListener('mousedown', dragStart);
         document.addEventListener('mousemove', drag);
         document.addEventListener('mouseup', dragEnd);
-        container.style.position = 'absolute';
-        container.style.top = '20px';
-        container.style.left = '20px';
-        container.style.zIndex = '100';
+        
+        // Enhanced positioning to work better with toolbar
+        container.style.position = 'fixed';
+        container.style.top = '100px'; // Move down to avoid header and toolbar
+        container.style.left = '50%'; // Center horizontally
+        container.style.transform = 'translateX(-50%)'; // Center using transform
+        container.style.zIndex = '1000'; // Higher z-index for better layering
         container.style.backgroundColor = 'white';
         container.style.padding = '5px';
         container.style.borderRadius = '5px';
-        container.style.boxShadow = '0 2px 4px rgba(0,0,0,0.2)';
+        container.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
         container.style.width = '800px';
         container.style.height = '250px';
         container.style.cursor = 'move';
-        container.style.display = 'flex';
+        container.style.display = 'none'; // Initially hidden
         container.style.flexDirection = 'column';
+        container.style.border = '1px solid #ddd';
+        container.style.maxWidth = 'calc(100vw - 40px)'; // Responsive width
+        container.style.maxHeight = 'calc(100vh - 150px)'; // Responsive height
 
         // Create timeline controls
         const controls = `
-            <div class="timeline-header" style="padding: 5px; border-bottom: 1px solid #ccc; cursor: default;">
+            <div class="timeline-header" style="padding: 8px; border-bottom: 1px solid #ccc; cursor: default; background: linear-gradient(to bottom, #f8f9fa, #e9ecef); border-radius: 5px 5px 0 0;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div style="display: flex; gap: 5px;">
+                    <div style="display: flex; gap: 5px; align-items: center;">
+                        <span style="font-weight: bold; font-size: 13px; color: #333; margin-right: 10px;">📅 Timeline</span>
                         <button id="collapseBtn" class="timeline-btn" data-tooltip="Collapse/Expand Panel">▢</button>
                         <button id="playButton" class="timeline-btn" data-tooltip="Play Animation">▶</button>
                         <button id="pauseButton" class="timeline-btn" data-tooltip="Pause Animation">⏸</button>
@@ -123,19 +268,20 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
                         <button id="deleteTaskBtn" class="timeline-btn" data-tooltip="Delete Selected Task">✕</button>
                         <button id="linkTasksBtn" class="timeline-btn" data-tooltip="Link Selected Tasks">⛓</button>
                     </div>
-                    <div style="display: flex; gap: 5px; align-items: center;">
-                        <div id="dateDisplay" style="font-family: Arial; font-size: 12px;">2025-01-01</div>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <div id="dateDisplay" style="font-family: Arial; font-size: 12px; padding: 2px 6px; background: #fff; border: 1px solid #ddd; border-radius: 3px;">2025-01-01</div>
                         <select id="simulationSpeed" class="timeline-select">
                             <option value="1000">1x</option>
                             <option value="500">2x</option>
                             <option value="250">4x</option>
                             <option value="100">8x</option>
                         </select>
+                        <button id="closeTimelineBtn" class="timeline-btn" data-tooltip="Close Timeline Panel" style="background: #dc3545;">✕</button>
                     </div>
                 </div>
-                <div style="display: flex; gap: 5px; align-items: center;">
+                <div style="display: flex; gap: 5px; align-items: center; margin-top: 5px;">
                     <input type="range" id="timeSlider" min="0" max="100" value="0" style="flex-grow: 1; height: 20px;">
-                    <span id="timeDisplay" style="font-size: 12px;">0%</span>
+                    <span id="timeDisplay" style="font-size: 12px; min-width: 35px;">0%</span>
                 </div>
             </div>
             <div class="timeline-content" style="display: flex; flex-direction: column; height: calc(100% - 70px); overflow: hidden;">
@@ -379,6 +525,11 @@ class TimelineExtension extends Autodesk.Viewing.Extension {
             );
             document.body.appendChild(linkDialog);
             linkDialog.showModal();
+        };
+
+        // Close Timeline button
+        document.getElementById('closeTimelineBtn').onclick = () => {
+            this.hideTimelinePanel();
         };
 
                 // Task selection and cell editing
